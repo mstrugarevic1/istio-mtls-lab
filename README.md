@@ -290,14 +290,33 @@ Because cleanup deletes the whole Kind cluster, it does not separately delete ev
 After installing Ambient components, use this single verification set:
 
 ```sh
+# Check every shell script for syntax errors.
 bash -n scripts/*.sh
+
+# Validate all Kubernetes manifests without changing the cluster.
 kubectl apply --dry-run=client -R -f manifests
+
+# Analyze Istio configuration across all namespaces.
 istioctl analyze -A
+
+# Run the Ambient mode pass/fail checks.
 ./scripts/14-verify-ambient-mode.sh
+
+# Check Istio control-plane and data-plane pods.
 kubectl get pods -n istio-system
+
+# Confirm ztunnel is scheduled and ready on each node.
 kubectl get daemonset ztunnel -n istio-system
+
+# Confirm the namespace waypoint exists and is ready.
 kubectl get gateway waypoint -n lab-mesh
+
+# Check sidecar, Ambient, and waypoint namespace labels.
 kubectl get namespace lab-mesh --show-labels
+
+# Confirm lab-mesh workloads are enrolled in ztunnel.
 istioctl ztunnel-config workloads -n istio-system
+
+# Confirm Ambient application pods do not contain istio-proxy.
 kubectl get pods -n lab-mesh -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].name}{"\n"}{end}'
 ```
