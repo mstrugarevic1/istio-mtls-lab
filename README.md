@@ -18,11 +18,7 @@ The lab demonstrates:
 
 ## Architecture
 
-```text
-Sidecar:    app + Envoy  --->  Envoy + app
-Ambient L4: app  --->  ztunnel  --->  ztunnel  --->  app
-Ambient L7: app  --->  ztunnel  --->  waypoint  --->  ztunnel  --->  app
-```
+![Istio sidecar, Ambient L4, and Ambient L7 data paths](istio-data-plane-modes.png)
 
 ## Concepts
 
