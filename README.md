@@ -1,83 +1,83 @@
-# kind-istio-mtls-lab
+# Istio mTLS Lab
 
-## What this is
+This lab demonstrates Istio mutual TLS, workload identity, L7 traffic management, and a reversible migration from sidecar mode to Ambient mode. Istio mTLS authenticates both workloads and encrypts service-to-service traffic without requiring TLS code in each application.
 
-This is a small local learning lab for understanding Istio mTLS with kind.
+Kind is the default local example, but the Istio workflow works on any compatible Kubernetes cluster. Only cluster creation and cleanup are Kind-specific. This is a focused learning lab, not a production template or official Istio tutorial.
 
-This is a personal proof of concept for my own learning on a local machine. It is not
-an official Istio tutorial, supported distribution, or production template.
+The lab demonstrates:
 
-The official Istio documentation teaches [mTLS migration](https://istio.io/latest/docs/tasks/security/authentication/mtls-migration/),
-[fault injection](https://istio.io/latest/docs/tasks/traffic-management/fault-injection/),
-and [circuit breaking](https://istio.io/latest/docs/tasks/traffic-management/circuit-breaking/)
-as focused tasks. This lab does not replace them. Its added value is one
-start-to-finish workshop: create a single local cluster, install Istio, compare
-mesh and non-mesh traffic, observe it, inject faults, and trip a circuit breaker.
+- sidecar mTLS in `PERMISSIVE` and `STRICT` mode
+- Ambient L4 mTLS through `ztunnel`
+- Ambient L7 processing through a waypoint
+- sidecar vs Ambient operational differences
+- migration validation
+- rollback to sidecar mode
+- fault injection and circuit breaking before and after migration
 
-It uses:
+`lab-external` always stays outside the mesh.
 
-- a local kind cluster
-- Istio sidecar mode
-- Kiali, Prometheus, and Grafana
-- a mesh namespace with injected sidecars
-- an external namespace without injected sidecars
-- simple HTTP workloads for traffic, failure injection, and circuit breaking
+## Architecture
 
-The lab is designed to show:
-
-- how Istio sidecar injection works
-- how workloads communicate inside a service mesh
-- how mTLS behaves in `PERMISSIVE` and `STRICT` mode
-- how traffic appears in Kiali
-- what changes when traffic comes from outside the mesh
-- how Istio fault injection and circuit breaking look in practice
-
-## What this is not
-
-- not production-ready
-- not a secure-by-default production config
-- not a reference architecture
-- not meant for cloud deployment
-
-## Naming
-
-The lab uses role-based names so each object explains what it does.
-
-| Name | Purpose |
-| --- | --- |
-| `lab-mesh` | Namespace with Istio sidecar injection enabled |
-| `lab-external` | Namespace without sidecar injection |
-| `mesh-client` | In-mesh curl client used for tests |
-| `external-client` | Out-of-mesh curl client used for mTLS checks |
-| `httpbin-server` | HTTP test server |
-| `nginx-server` | Simple web server |
-| `whoami-server` | Simple identity/debug server |
-| `mesh-traffic-generator` | Continuous in-mesh request generator |
-| `load-tester` | Fortio load tester for circuit breaker tests |
+```text
+Sidecar:    app + Envoy  --->  Envoy + app
+Ambient L4: app  --->  ztunnel  --->  ztunnel  --->  app
+Ambient L7: app  --->  ztunnel  --->  waypoint  --->  ztunnel  --->  app
+```
 
 ## Concepts
 
-**Service mesh**: Infrastructure that handles service-to-service traffic, security, telemetry, and policy without putting that logic in each app.
+**Sidecar**: an Envoy proxy container named `istio-proxy` that runs in each application pod and handles mTLS, telemetry, and L7 policy.
 
-**Sidecar**: A helper container that runs next to the application container in the same pod.
+**ztunnel**: Ambient's per-node L4 proxy. It provides mesh identity, HBONE tunneling, L4 mTLS, and L4 telemetry without an application sidecar.
 
-**istio-proxy**: Istio's Envoy sidecar container. It intercepts pod traffic and applies mesh behavior such as mTLS and telemetry.
+**HBONE**: HTTP-Based Overlay Network Environment. Istio uses it to tunnel workload traffic through the Ambient data plane.
 
-**mTLS**: Mutual TLS. Both sides of a connection prove identity with certificates and encrypt traffic.
+**Waypoint**: an Envoy proxy deployed as a Kubernetes Gateway. Ambient uses it for L7 behavior such as HTTP routing, fault injection, circuit breaking, and HTTP telemetry.
 
-**PeerAuthentication**: Istio policy that controls whether workloads accept plaintext traffic, mTLS traffic, or require mTLS.
+**L4 vs L7**: `ztunnel` handles TCP-level security and routing. HTTP behavior requires a waypoint.
 
-**PERMISSIVE mode**: Workloads accept both plaintext and mTLS traffic. This is useful for learning and migration.
+**PeerAuthentication**: Istio policy used here during the sidecar phase to compare `PERMISSIVE` and `STRICT` mTLS. After Ambient migration, mTLS comes from `ztunnel`, so the sidecar-only policy is removed.
 
-**STRICT mode**: Workloads require mTLS. Clients without an Istio sidecar and mesh identity should fail to connect normally.
+## Sidecar vs Ambient
 
-**Kiali**: A web UI that shows Istio service mesh topology, traffic, health, and configuration.
+| Area | Sidecar | Ambient |
+|---|---|---|
+| Data plane | Envoy in every pod | `ztunnel` per node, optional waypoint |
+| Application pod | Contains `istio-proxy` | No Istio sidecar |
+| L4 mTLS | Sidecars | `ztunnel` |
+| HTTP routing/faults | Sidecars | Waypoint required |
+| Circuit breaking | Sidecars | Waypoint for L7 policy |
+| Resource model | Proxy per replica | Shared node proxy and waypoint |
+| Lifecycle | Coupled to pod rollout | Platform-managed |
+| Debugging | `istioctl proxy-status` | `istioctl ztunnel-config workloads` and waypoint checks |
 
-**Prometheus**: Metrics storage used by Kiali to build useful traffic graphs and service metrics.
+Ambient is not universally better. Sidecars are mature and give each workload a dedicated proxy. Ambient lowers per-pod overhead and separates L4 from L7 processing, but L7 behavior depends on waypoint deployment and Gateway API maturity.
+
+## Sidecar-to-Ambient migration
+
+Ambient is useful when per-pod proxy overhead and sidecar lifecycle coupling are operational concerns. A node-level `ztunnel` provides workload identity, L4 mTLS, and TCP telemetry. Waypoints are optional Envoy proxies used mainly when a namespace needs L7 routing, policy, fault injection, circuit breaking, or HTTP telemetry.
+
+A safe namespace migration configures the waypoint first, enables Ambient while sidecars still protect the workloads, verifies ztunnel enrollment and traffic, removes future sidecar injection, and restarts workloads last:
+
+```sh
+./scripts/12-install-ambient-components.sh
+kubectl wait --for=condition=programmed --timeout=120s gateway/waypoint -n lab-mesh
+
+kubectl label namespace lab-mesh istio.io/use-waypoint=waypoint --overwrite
+kubectl label namespace lab-mesh istio.io/dataplane-mode=ambient --overwrite
+istioctl ztunnel-config workloads -n istio-system --workload-namespace lab-mesh
+kubectl exec -n lab-mesh deploy/mesh-client -c mesh-client -- curl -fsS http://httpbin-server:8000/get
+
+kubectl label namespace lab-mesh istio-injection-
+kubectl rollout restart deployment -n lab-mesh
+kubectl rollout status deployment -n lab-mesh
+```
+
+`scripts/13-migrate-to-ambient.sh` performs this sequence for the lab and also removes the sidecar-phase `PeerAuthentication`.
 
 ## Prerequisites
 
-The lab intentionally uses a small, fixed compatibility set:
+The default Kind path uses this fixed compatibility set:
 
 | Component | Version |
 | --- | --- |
@@ -86,105 +86,50 @@ The lab intentionally uses a small, fixed compatibility set:
 | Kubernetes node | 1.32.2, pinned by image digest |
 | kubectl | 1.32.x |
 | Istio / istioctl | 1.30.1 |
+| Gateway API CRDs | v1.5.1 |
 
-Other versions may work but are not supported by this POC. Istio 1.30 supports
-Kubernetes 1.32 through 1.36; this lab pins the oldest supported minor to keep
-the environment reproducible.
+Other versions may work but are not supported by this POC.
 
-## Phase 1: Create the kind cluster
+For an existing compatible cluster, skip Phase 1 and make sure the active `kubectl` context targets that cluster. The remaining setup uses `kubectl` and the pinned `istioctl` version.
+
+## Names
+
+| Name | Purpose |
+| --- | --- |
+| `lab-mesh` | Namespace migrated from sidecar mode to Ambient mode |
+| `lab-external` | Namespace outside the mesh |
+| `mesh-client` | In-mesh curl client used for tests |
+| `external-client` | Out-of-mesh curl client used for mTLS checks |
+| `httpbin-server` | HTTP test server |
+| `nginx-server` | Simple web server |
+| `whoami-server` | Simple identity/debug server |
+| `mesh-traffic-generator` | Continuous in-mesh request generator |
+| `load-tester` | Fortio load tester for circuit breaker tests |
+| `waypoint` | Ambient service waypoint for `lab-mesh` L7 traffic |
+
+## Phase 1: Create a local Kind cluster
 
 ```sh
 ./scripts/00-bootstrap-cluster.sh
 ```
 
-## Phase 2: Install Istio
+Skip this Kind-specific step when using an existing compatible Kubernetes cluster.
+
+## Phase 2: Install Istio sidecar profile
 
 ```sh
 ./scripts/01-install-istio.sh
 ```
 
-This lab uses the Istio demo profile because it is convenient for learning. It is not production-ready.
+This installs the Istio demo profile. It is convenient for learning and not production-ready.
 
-## Phase 3: Install observability tools
+## Phase 3: Install observability
 
 ```sh
 ./scripts/02-install-observability.sh
 ```
 
-This installs Prometheus, Grafana, and Kiali.
-
-The script first tries to find addon manifests under the local Istio installation. If it cannot find them, it downloads matching sample manifests from GitHub based on the local `istioctl` client version.
-
-If you want to force local manifests, set `ISTIO_DIR`:
-
-```sh
-ISTIO_DIR=/path/to/istio ./scripts/02-install-observability.sh
-```
-
-## Phase 4: Deploy workloads
-
-```sh
-./scripts/03-deploy-workloads.sh
-```
-
-This creates:
-
-- `lab-mesh`
-- `lab-external`
-- `mesh-client`
-- `external-client`
-- `httpbin-server`
-- `nginx-server`
-- `whoami-server`
-
-## Phase 5: Verify sidecar injection
-
-```sh
-kubectl get pods -n lab-mesh
-```
-
-```sh
-kubectl get pods -n lab-mesh -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].name}{"\n"}{end}'
-```
-
-Pods in `lab-mesh` should contain two containers:
-
-- the application container, such as `mesh-client`, `httpbin-server`, `nginx-server`, or `whoami-server`
-- the `istio-proxy` sidecar container
-
-The `istio-proxy` container appears because the `lab-mesh` namespace has `istio-injection=enabled`.
-
-The `external-client` pod in `lab-external` should not have an `istio-proxy` sidecar.
-
-## Phase 6: Test mTLS PERMISSIVE
-
-Run the mode-aware test. The script applies the policy and verifies it:
-
-```sh
-./scripts/04-test-mtls-mode.sh permissive
-```
-
-Expected behavior:
-
-- `mesh-client` to `httpbin-server` works
-- `external-client` to `httpbin-server` works because plaintext is accepted
-
-## Phase 7: Test mTLS STRICT
-
-Run the mode-aware test. It first proves that the external request works in
-`PERMISSIVE`, then applies `STRICT` and requires the expected connection reset:
-
-```sh
-./scripts/04-test-mtls-mode.sh strict
-```
-
-Expected behavior:
-
-- in-mesh traffic works because both sides have Istio sidecars and mesh identity
-- external plaintext traffic fails because the external client has no Istio sidecar and no mesh identity
-- the script reports that external failure as `PASS`
-
-## Phase 8: Generate traffic for Kiali
+This installs Prometheus, Grafana, and Kiali. The script uses local Istio addon manifests when available, then falls back to matching sample manifests from GitHub.
 
 Open Kiali:
 
@@ -192,13 +137,43 @@ Open Kiali:
 istioctl dashboard kiali
 ```
 
-Start continuous in-mesh traffic:
+## Phase 4: Deploy sidecar workloads
+
+```sh
+./scripts/03-deploy-workloads.sh
+```
+
+`lab-mesh` starts with `istio-injection=enabled`, so its application pods contain `istio-proxy`. `lab-external` has no mesh enrollment labels.
+
+Check sidecars:
+
+```sh
+kubectl get pods -n lab-mesh -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].name}{"\n"}{end}'
+```
+
+## Phase 5: Test sidecar mTLS
+
+`PERMISSIVE` accepts both mesh mTLS and plaintext from `lab-external`:
+
+```sh
+./scripts/04-test-mtls-mode.sh permissive
+```
+
+`STRICT` accepts mesh mTLS and rejects plaintext from `lab-external`:
+
+```sh
+./scripts/04-test-mtls-mode.sh strict
+```
+
+`PERMISSIVE` and `STRICT` are sidecar-phase exercises. Ambient mTLS is provided by `ztunnel`.
+
+## Phase 6: Generate traffic
 
 ```sh
 ./scripts/05-start-mesh-traffic.sh
 ```
 
-The traffic generator continuously calls:
+The traffic generator calls:
 
 - `http://httpbin-server:8000/get`
 - `http://nginx-server`
@@ -206,70 +181,95 @@ The traffic generator continuously calls:
 
 ![Kiali traffic graph showing the lab-mesh services, mTLS traffic, injected failures, and load testing](kiali-istio.png)
 
-Check logs:
-
-```sh
-kubectl logs -n lab-mesh deploy/mesh-traffic-generator -c mesh-traffic-generator -f
-```
-
 Stop traffic:
 
 ```sh
 ./scripts/06-stop-mesh-traffic.sh
 ```
 
-## Phase 9: Inject failures
+## Phase 7: Test sidecar L7 behavior
 
-Enable fault injection for `whoami-server`:
+Enable 50% HTTP 503 fault injection for `whoami-server`:
 
 ```sh
 ./scripts/07-enable-whoami-faults.sh
 ```
 
-This applies an Istio `VirtualService` that returns HTTP `503` for about 50% of requests to `whoami-server`.
-
-Keep the traffic generator running, then check Kiali:
-
-- open `Graph`
-- select namespace `lab-mesh`
-- use a recent time range, such as last 5 minutes
-- look for failed traffic on the edge from `mesh-traffic-generator` to `whoami-server`
-
-Disable fault injection:
+Disable it:
 
 ```sh
 ./scripts/08-disable-whoami-faults.sh
 ```
 
-## Phase 10: Test circuit breaking
-
-Enable an aggressive `DestinationRule` for `httpbin-server`:
+Enable and test aggressive circuit breaking for `httpbin-server`:
 
 ```sh
 ./scripts/09-enable-httpbin-circuit-breaker.sh
-```
-
-Run concurrent load from the in-mesh `load-tester`:
-
-```sh
 ./scripts/10-test-httpbin-circuit-breaker.sh
 ```
 
-The script first requires a baseline of 60 successful requests without the
-circuit breaker. It then enables the rule and requires both successful `200`
-responses and circuit-breaker `503` responses:
-
-- at least one request succeeds
-- at least one request fails fast with HTTP `503`
-- Kiali should show failed traffic on the edge from `load-tester` to `httpbin-server`
-
-Disable the circuit breaker:
+Disable it:
 
 ```sh
 ./scripts/11-disable-httpbin-circuit-breaker.sh
 ```
 
-## Phase 11: Cleanup
+## Phase 8: Install Ambient components
+
+```sh
+./scripts/12-install-ambient-components.sh
+```
+
+This installs pinned Gateway API CRDs if needed, upgrades the existing Istio install to the Ambient profile, waits for `istiod`, `istio-cni-node`, and `ztunnel`, restarts `lab-mesh` so sidecars receive HBONE interoperability config, and deploys the `waypoint` Gateway.
+
+This phase does not activate the waypoint and does not remove sidecar injection.
+
+## Phase 9: Migrate `lab-mesh` to Ambient
+
+```sh
+./scripts/13-migrate-to-ambient.sh
+```
+
+This labels only `lab-mesh` for Ambient and waypoint use, removes future sidecar injection, removes the sidecar mTLS `PeerAuthentication`, and restarts workloads last. The migration is namespace-scoped and reversible.
+
+After migration, `lab-mesh` application pods should not contain `istio-proxy`.
+
+## Phase 10: Validate Ambient mode
+
+```sh
+./scripts/14-verify-ambient-mode.sh
+```
+
+`ztunnel` provides L4 telemetry. HTTP metrics and L7 behavior require waypoint processing.
+
+## Phase 11: Rerun L7 tests through the waypoint
+
+The existing `DestinationRule` circuit breaker is kept and tested through the waypoint:
+
+```sh
+./scripts/09-enable-httpbin-circuit-breaker.sh
+./scripts/10-test-httpbin-circuit-breaker.sh
+```
+
+The existing fault injection uses an Istio `VirtualService`:
+
+```sh
+./scripts/07-enable-whoami-faults.sh
+```
+
+Istio 1.30 supports `VirtualService` with waypoints only as an Alpha path. Gateway API `HTTPRoute` is the preferred stable Ambient API, but it does not represent this lab's exact 50% abort fault injection. Do not apply a competing `HTTPRoute` to `whoami-server` at the same time.
+
+## Phase 12: Roll back to sidecar mode
+
+```sh
+./scripts/15-rollback-to-sidecar.sh
+```
+
+Rollback restores `istio-injection=enabled`, restarts workloads until sidecars are present, removes Ambient namespace labels, restores the sidecar `STRICT` mTLS policy, and reruns the original sidecar mTLS test.
+
+It is acceptable for rollback to leave cluster-wide Ambient components installed.
+
+## Cleanup
 
 Cleanup asks for confirmation before deleting the kind cluster:
 
@@ -283,57 +283,21 @@ For non-interactive cleanup:
 ./scripts/99-cleanup.sh --yes
 ```
 
-## Validation commands
+Because cleanup deletes the whole Kind cluster, it does not separately delete every Ambient resource first. On another Kubernetes cluster, remove the lab namespaces and Istio resources according to that cluster's lifecycle policy instead of running this script.
+
+## Verification
+
+After installing Ambient components, use this single verification set:
 
 ```sh
-kubectl get pods -n lab-mesh
-```
-
-```sh
-kubectl get pods -n lab-external
-```
-
-```sh
-kubectl get peerauthentication -n lab-mesh
-```
-
-```sh
-kubectl describe peerauthentication -n lab-mesh
-```
-
-```sh
-istioctl proxy-status
-```
-
-```sh
+bash -n scripts/*.sh
+kubectl apply --dry-run=client -R -f manifests
+istioctl analyze -A
+./scripts/14-verify-ambient-mode.sh
 kubectl get pods -n istio-system
+kubectl get daemonset ztunnel -n istio-system
+kubectl get gateway waypoint -n lab-mesh
+kubectl get namespace lab-mesh --show-labels
+istioctl ztunnel-config workloads -n istio-system
+kubectl get pods -n lab-mesh -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].name}{"\n"}{end}'
 ```
-
-```sh
-kubectl get svc -n istio-system
-```
-
-```sh
-kubectl logs -n lab-mesh deploy/mesh-client -c istio-proxy
-```
-
-```sh
-kubectl get virtualservice -n lab-mesh
-```
-
-```sh
-kubectl get destinationrule -n lab-mesh
-```
-
-## Operational hygiene included
-
-The manifests include basic learning-lab hygiene:
-
-- common `app.kubernetes.io/*` labels
-- CPU and memory requests
-- CPU and memory limits
-- readiness probes
-- liveness probes
-- explicit cleanup confirmation
-
-These settings are intentionally small because this is a local kind lab.
