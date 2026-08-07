@@ -50,10 +50,10 @@ fi
 verify_traffic
 
 kubectl label namespace lab-mesh istio-injection- >/dev/null 2>&1 || true
-kubectl delete peerauthentication lab-mesh-mtls -n lab-mesh --ignore-not-found=true
 
 kubectl rollout restart deployment -n lab-mesh -l "${LAB_SELECTOR}"
 wait_for_lab_rollouts
 all_pods_lack_sidecars
+verify_traffic
 
 echo "lab-mesh is migrated to Ambient mode with waypoint L7 processing."

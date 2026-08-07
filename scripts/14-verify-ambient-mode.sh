@@ -75,6 +75,26 @@ check_external_outside_mesh() {
   fi
 }
 
+check_strict_mtls() {
+  local mode
+  mode="$(kubectl get peerauthentication lab-mesh-mtls -n lab-mesh -o jsonpath='{.spec.mtls.mode}' 2>/dev/null || true)"
+
+  if [[ "${mode}" == "STRICT" ]]; then
+    pass "lab-mesh requires STRICT mTLS"
+  else
+    fail "lab-mesh expected STRICT mTLS, found ${mode:-unset}"
+  fi
+}
+
+check_external_plaintext_rejected() {
+  if kubectl exec -n lab-external deploy/external-client -c external-client -- \
+    curl -fsS --max-time 5 http://httpbin-server.lab-mesh:8000/get >/dev/null 2>&1; then
+    fail "external plaintext reaches lab-mesh despite STRICT mTLS"
+  else
+    pass "external plaintext is rejected by STRICT mTLS"
+  fi
+}
+
 check_ztunnel_hbone() {
   local output
   output="$(istioctl ztunnel-config workloads -n istio-system --workload-namespace lab-mesh 2>/dev/null || true)"
@@ -110,14 +130,21 @@ check_label lab-mesh istio.io/use-waypoint waypoint
 check_label_absent lab-mesh istio-injection
 check_rollout daemonset/ztunnel istio-system
 check_rollout daemonset/istio-cni-node istio-system
-kubectl wait --for=condition=programmed --timeout=60s gateway/waypoint -n lab-mesh >/dev/null 2>&1 && pass "lab-mesh/waypoint Gateway is programmed" || fail "lab-mesh/waypoint Gateway is not programmed"
+if kubectl wait --for=condition=programmed --timeout=60s gateway/waypoint -n lab-mesh >/dev/null 2>&1; then
+  pass "lab-mesh/waypoint Gateway is programmed"
+else
+  fail "lab-mesh/waypoint Gateway is not programmed"
+fi
 check_rollout deployment/waypoint lab-mesh
+check_rollout deployment/external-client lab-external
 check_no_sidecars
 check_ztunnel_hbone
 check_request httpbin-server http://httpbin-server:8000/get
 check_request nginx-server http://nginx-server
 check_request whoami-server http://whoami-server
 check_external_outside_mesh
+check_strict_mtls
+check_external_plaintext_rejected
 
 if [[ "${FAILED}" -ne 0 ]]; then
   exit 1
