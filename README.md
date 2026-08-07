@@ -221,7 +221,7 @@ This installs pinned Gateway API CRDs if needed, upgrades the existing Istio ins
 
 This phase does not activate the waypoint and does not remove sidecar injection.
 
-## Phase 9: Migrate `lab-mesh` to Ambient
+## Phase 9: Migrate lab-mesh to Ambient
 
 ```sh
 ./scripts/13-migrate-to-ambient.sh
@@ -284,7 +284,7 @@ Because cleanup deletes the whole Kind cluster, it does not separately delete ev
 
 ## Verification
 
-After installing Ambient components, use this single verification set:
+After migrating `lab-mesh` to Ambient mode, use this verification set:
 
 ```sh
 # Check every shell script for syntax errors.
