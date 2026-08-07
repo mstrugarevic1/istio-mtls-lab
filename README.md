@@ -30,9 +30,9 @@ The lab demonstrates:
 
 **Waypoint**: an Envoy proxy deployed as a Kubernetes Gateway. Ambient uses it for L7 behavior such as HTTP routing, fault injection, circuit breaking, and HTTP telemetry.
 
-**L4 vs L7**: `ztunnel` handles TCP-level security and routing. HTTP behavior requires a waypoint.
+**L4 vs L7**: `ztunnel` handles TCP-level security and routing. HTTP-aware Istio routing, policy, and telemetry require a waypoint.
 
-**PeerAuthentication**: Istio policy used here during the sidecar phase to compare `PERMISSIVE` and `STRICT` mTLS. After Ambient migration, mTLS comes from `ztunnel`, so the sidecar-only policy is removed.
+**PeerAuthentication**: Istio policy that controls inbound mTLS requirements in both sidecar and Ambient modes. This lab keeps `STRICT` during migration so `ztunnel` continues to reject plaintext traffic from outside the mesh.
 
 ## Sidecar vs Ambient
 
@@ -67,9 +67,10 @@ kubectl exec -n lab-mesh deploy/mesh-client -c mesh-client -- curl -fsS http://h
 kubectl label namespace lab-mesh istio-injection-
 kubectl rollout restart deployment -n lab-mesh
 kubectl rollout status deployment -n lab-mesh
+kubectl exec -n lab-mesh deploy/mesh-client -c mesh-client -- curl -fsS http://httpbin-server:8000/get
 ```
 
-`scripts/13-migrate-to-ambient.sh` performs this sequence for the lab and also removes the sidecar-phase `PeerAuthentication`.
+`scripts/13-migrate-to-ambient.sh` performs this sequence and keeps `PeerAuthentication` in `STRICT` mode throughout the migration.
 
 ## Prerequisites
 
@@ -161,7 +162,7 @@ kubectl get pods -n lab-mesh -o jsonpath='{range .items[*]}{.metadata.name}{"\t"
 ./scripts/04-test-mtls-mode.sh strict
 ```
 
-`PERMISSIVE` and `STRICT` are sidecar-phase exercises. Ambient mTLS is provided by `ztunnel`.
+Ambient mTLS is provided by `ztunnel`, which also enforces the retained `STRICT` policy against plaintext inbound traffic.
 
 ## Phase 6: Generate traffic
 
@@ -226,7 +227,7 @@ This phase does not activate the waypoint and does not remove sidecar injection.
 ./scripts/13-migrate-to-ambient.sh
 ```
 
-This labels only `lab-mesh` for Ambient and waypoint use, removes future sidecar injection, removes the sidecar mTLS `PeerAuthentication`, and restarts workloads last. The migration is namespace-scoped and reversible.
+This labels only `lab-mesh` for Ambient and waypoint use, removes future sidecar injection, restarts workloads last, and verifies traffic again through the sidecarless Ambient data plane. The migration is namespace-scoped and reversible.
 
 After migration, `lab-mesh` application pods should not contain `istio-proxy`.
 
@@ -261,7 +262,7 @@ Istio 1.30 supports `VirtualService` with waypoints only as an Alpha path. Gatew
 ./scripts/15-rollback-to-sidecar.sh
 ```
 
-Rollback restores `istio-injection=enabled`, restarts workloads until sidecars are present, removes Ambient namespace labels, restores the sidecar `STRICT` mTLS policy, and reruns the original sidecar mTLS test.
+Rollback restores `istio-injection=enabled`, restarts workloads until sidecars are present, removes Ambient namespace labels, ensures the retained `STRICT` mTLS policy is applied, and reruns the original sidecar mTLS test.
 
 It is acceptable for rollback to leave cluster-wide Ambient components installed.
 
